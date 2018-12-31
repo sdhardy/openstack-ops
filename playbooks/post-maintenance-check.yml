@@ -1,0 +1,107 @@
+---
+# Copyright 2017-Present, Rackspace Inc
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+- name: Check service status on the utility container
+  hosts: utility_container[0]
+  gather_facts: "{{ gather_facts | default(true) }}"
+  vars_files:
+    - "vars/main.yml"
+  tasks:
+    - name: Check for down nova services
+      shell: |
+        . /root/openrc
+        {{ ops_pip_venv_enabled | bool | ternary(ops_venv, omit) }}/bin/nova service-list | tail -n +3 | grep 'down'
+      register: nova_check
+      changed_when: false
+      failed_when: nova_check.rc >= 2
+  
+    - name: Check for down Neutron services
+      shell: | 
+       . /root/openrc
+       {{ ops_pip_venv_enabled | bool | ternary(ops_venv, omit) }}/bin/neutron agent-list |tail -n +3 | grep 'xxx'
+      register: neutron_check
+      changed_when: false
+      failed_when: neutron_check.rc >= 2
+
+    - name: Check for down Cinder services
+      shell: |
+       . /root/openrc
+       {{ ops_pip_venv_enabled | bool | ternary(ops_venv, omit) }}/bin/cinder service-list |tail -n +3 | grep 'down'
+      register: cinder_check
+      changed_when: false
+      failed_when: cinder_check.rc >= 2
+
+    - debug: 
+       msg: "{{ item | regex_findall ('\\|\\s+([a-z0-9\\-]+)\\s+') | join(' | ') }}"
+      when: nova_check.rc == 0 or neutron_check.rc == 0 or cinder_check.rc == 0
+      failed_when: nova_check.rc == 0 or neutron_check.rc == 0 or cinder_check.rc == 0
+      with_items:
+       "{{ nova_check.stdout_lines + neutron_check.stdout_lines + cinder_check.stdout_lines }}"
+
+- name: Checking Galera Status
+  hosts: galera_all
+  gather_facts: "{{ gather_facts | default(true) }}"
+  vars_files:
+    - "vars/main.yml"
+  vars:
+   galera_host_count: "{{ groups['galera_all'] | length }}"
+  tasks:
+    - name: Check for missing Galera nodes
+      shell: mysql -e "show status like 'wsrep_clu%'"
+      register: galera_check
+      changed_when: false
+
+    - set_fact:
+        wsrep_cluster_size: "{{ galera_check.stdout | regex_search('wsrep_cluster_size\\t([0-9]+)') | regex_replace('wsrep_cluster_size\t') }}"
+        wsrep_cluster_status: "{{ galera_check.stdout | regex_search('wsrep_cluster_status\\t([a-zA-Z]+)') | regex_replace('wsrep_cluster_status\t') }}"
+
+    - debug:
+       msg: "wsrep_cluster_size < {{ galera_host_count }} -- Cluster Size: {{ wsrep_cluster_size }}"
+      failed_when: wsrep_cluster_size != galera_host_count
+      when: wsrep_cluster_size != galera_host_count
+
+    - debug:
+       msg: "wsrep_cluster_status != Primary! -- Cluster Status: {{ wsrep_cluster_status }}"
+      failed_when: wsrep_cluster_status != "Primary"
+      when: wsrep_cluster_status != "Primary"
+
+- name: Checking RabbitMQ status
+  hosts: rabbitmq_all
+  gather_facts: "{{ gather_facts | default(true) }}"
+  vars_files:
+    - "vars/main.yml"
+  vars:
+   rabbit_host_count: "{{ groups['rabbitmq_all'] | length }}"
+  tasks:
+    - name: Checking RabbitMQ cluster status
+      shell: rabbitmqctl cluster_status | tr -d '\040\011\012\015'
+      register: rabbit_check
+      changed_when: false
+
+    - set_fact:
+        rabbit_nodes: "{{ rabbit_check.stdout | regex_findall('\\{running_nodes\\,\\[(.*)\\]\\}\\,\\{cluster_name') }}"  
+        rabbit_partitions: "{{ rabbit_check.stdout | regex_findall('\\{partitions\\,\\[(.*)\\]\\}\\,') }}"
+
+    - set_fact:
+        rabbit_node_count: "{{ rabbit_nodes[0].split(',') | length }}"
+
+    - debug:
+       msg: "Rabbit partitions detected! -- Partition: {{ rabbit_partitions[0] }}"
+      when: rabbit_partitions[0] != ""
+      failed_when: rabbit_partitions[0] != ""
+
+    - debug:
+       msg: "Incorrect node count. Nodes listed: {{ rabbit_node_count }}, host count: {{ rabbit_host_count }}"
+      when: rabbit_node_count != rabbit_host_count
+      failed_when: rabbit_node_count != rabbit_host_count
